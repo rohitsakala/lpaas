@@ -33,18 +33,109 @@ To support streaming, both stdout and stderr are written to two destinations usi
 2. the writer end of an `io.Pipe`, which enables live streaming to consumers.
 
 ###### Streaming a Job
-For each client, a new `io.Pipe` is created (reader + writer).
 
-1. If the job has already exited, the buffer (outbuf) contents are written to the writer once, and the API server streams them via the reader end of the `io.Pipe`
+1. I will maintain a list of clients for streaming. Each client will have a buffered channel. 
 
-2. If the job is still running, the client's `io.Pipe` `writer` is added to a list of active `consumers`. A broadcaster goroutine continuously writes new process output to all consumer's `io.Pipe` writers, ensuring that each client receives output from start to finish.
+2. When the job starts, I will start a goroutine (broadcaster) to read from the main `io.Pipe` (where stdout and stderr are written) and write the data into the buffered channels of each client in non blocking way. If the channel gets full due to a slow reader, only that reader is effected.
 
-3. When the job finishes (cmd.Wait() returns), all subscriber pipes and the main output pipe are closed, producing an EOF on the readers. The gRPC server reads until this EOF. 
+3. If the job has already exited, I wouldn't use the channel instead, a reader over the buffer (outbuf) contents is passed on to the API server to stream them.
+
+4. If the job is still running, I add the client to the list and so the broadcaster goroutine reads from the main process pipe and distributes each chunk to all active consumer's channels. This ensures that every connected client receives real-time output from the process as it is produced. Before sending the live output stream, I ensure I send the snapshot of `outbuf` and then stream though a struct which implement io.Reader().
+
+6. When the job finishes (cmd.Wait() returns), all consumer channels and the main process pipe are closed. This cleanly signals an EOF to the gRPC server, which stops streaming once all output has been delivered.
+
+7. In the case of streaming, the API server will deal with the Job directly after getting the Job instance from the Job manager.
 
 I have used `io.Pipe` since it is Go’s built-in in-memory stream that directly connects a writer and reader without using files or sockets. It satisfies the challenge requirement because it’s fully event-driven. 
 
 
 ![Streaming Logs](images/stream.png)
+
+
+###### Streaming internals (Golang)
+
+The following pseudocode illustrates how process output flows through the in-memory pipeline and is broadcasted to multiple concurrent consumers using Go channels and pipes. Please note that the pseudocode snippets is not real Golang code,is trimmed and is only added for the purpose of understanding.
+
+1. Before the job starts, I create a main pipe and `outbuf` and write process outputs into them.
+
+<pre>
+pr, pw := io.Pipe()
+j.mainReader, j.mainWriter = pr, pw
+
+// write process output to: 1) in-memory buffer, 2) master pipe
+mw := io.MultiWriter(j.outBuf, pw)
+cmd.Stdout = mw
+cmd.Stderr = mw
+</pre>
+
+2. Before the job starts, I also start a broadcaster to send output logs to all active consumer's buffered channels in a non blocking way.
+
+<pre>
+for {
+  chunk := j.mainReader.Read(buf)
+  for _, s := range j.consumers {
+    select {
+      case s.ch <- chunk:
+      default:
+        // slow reader: drop for this consumer, don't block others
+    }
+  }
+}
+</pre>
+
+3. Then the job starts and everything goes on. Later, when some client/consumer wants to request streaming, they are added to the list of consumers and a struct which implements io.Reader is created for them and reader is sent to the GRPC server.
+
+<pre>
+snapshot := bytes.NewReader(j.outBuf.Bytes()) // capture log till now
+j.consumers = append(j.consumers, consumer) // add to the consumers list
+
+// reader that will: 1) read snapshot, 2) read from channel
+r := &streamingReader{
+	snapshot: snapshot,
+	consumer: consumer,
+}
+
+return r
+}
+</pre>
+
+4. Before we go through how GRPC server reads it, lets understand the read function of the streamingReader
+
+<pre>
+func Read(p []byte) (int, error) {
+  // Send the snapshot of outbuf first
+  n, err := r.snapshot.Read(p)
+  if err == io.EOF {
+    r.snapshot = nil // move to live streaming
+  }
+  if n > 0 {
+    return n, nil
+  }
+
+  // then steam live chunks
+  select {
+  case data, ok := <-r.consumer.ch:
+    n := copy(p, data)
+    return n, nil
+  case <-r.consumer.done:
+    return 0, io.EOF
+}
+</pre>
+
+5. Now, the GRPC server reads from the reader and sends the chunks to the client.
+
+<pre>
+  for {
+    n, err := reader.Read(buf)
+    if n > 0 {
+      stream.Send(buf[:n])
+    }
+    if err == io.EOF {
+      return nil
+    }
+  }
+</pre>
+
 
 ###### Stop Job
 
@@ -74,9 +165,9 @@ const (
 
 ##### Job Manager
 
-This will be a struct which will be responsible for all the operations that the API server would like to perform. This struct will be a bridge between the API server and job/cgroup structs. The following are the Jobmanager's responsibilities:
+This will be a struct which will be responsible for all the operations that the API server would like to perform. This struct will be a bridge between the API server and job/cgroup structs. I will be maintaining a jobManager per client. The following are the Jobmanager's responsibilities:
 
-1. It maintains two maps : one for the ownership and two for the list of jobs with its job ids. It will also have helper functions to set and retrieve the owner when will be used by the API server for authorization.
+1. It maintains one map : A map of job ids and its job structs.
 2. When the API server tells the Job manager to start a job, the job manager will take care of creating a unique job id using [uuid](https://github.com/google/uuid) package, creating the cgroup directory for the job and fetching file descriptor of it and invoking the job start function with the `fd`. This will probably be an asynchronous operation.
 3. Similary for stopping a job, the Job manager will call the stop function of job and make sure of deleting the cgroup directory for that job. This will be a synchronous function.
 4. It is also responsible for returning the Job struct based on ID whenever requested by the API server.
@@ -199,6 +290,9 @@ lpaas status job-97dd115d-887d-4b8b-b746-59246e8d0ebf
 
 #### gRPC API Server
 
+
+The gRPC API server is responsible to maintining the ownership of the jobmanager per client. It will maintain a map which contains the client and its Job manager. 
+
 ##### API
 
 This component will expose a gRPC API server that uses Protocol Buffers for both requests and responses. The API will be versioned with the initial version being v1alpha1.
@@ -223,11 +317,11 @@ service Lpaas {
 
   // Stops a running job by its ID.
   // Returns the status of the job.
-  rpc StopJob(JobRequest) returns (StopJobResponse);
+  rpc StopJob(StopJobRequest) returns (StopJobResponse);
 
   // Query the status of a job.
   // Returns current status and error details if any.
-  rpc GetStatus(JobRequest) returns (StatusJobResponse);
+  rpc GetStatus(StatusJobRequest) returns (StatusJobResponse);
 
   // Stream output from a running or completed job. 
   rpc StreamOutput(StreamRequest) returns (stream StreamChunk);
@@ -243,7 +337,12 @@ message StartJobResponse {
   string id = 1;
 }
 
-message JobRequest {
+message StopJobRequest {
+  // Job ID
+  string id = 1;
+}
+
+message StatusJobRequest {
   // Job ID
   string id = 1;
 }
@@ -278,6 +377,62 @@ message StreamChunk {
 message StopJobResponse {}
 </pre>
 
+### GO Library API
+
+#### JobManager
+
+A JobManager manages a set of Linux jobs for a single authenticated user. A job manager instance is created per client.
+
+<pre>
+type JobManager struct {
+    // Create track Linux jobs.
+    jobs map[string]*Job
+}
+
+func NewJobManager() *JobManager
+func (m *JobManager) StartJob(command string, args ...string) (string, error)
+func (m *JobManager) StopJob(id string) error
+func (m *JobManager) GetJob(id string) (*Job, error)
+func (m *JobManager) Status(id string) (JobStatus, int, error)
+</pre>
+
+#### Job
+
+A job is responsible for start a linux process and other related activities such as stop, status and streaming.
+
+<pre>
+type Job struct {
+    ID      string
+    Command string
+    Args    []string
+    outBuf *bytes.Buffer
+
+    mainReader *io.PipeReader
+    mainWriter *io.PipeWriter
+    consumers []*consumer // Has its own buffered channel
+}
+
+func (j *Job) Start(ctx context.Context, cgroupFD int) error
+func (j *Job) Stop() error
+func (j *Job) Stream() io.ReadCloser
+func (j *Job) StatusSnapshot() (JobStatus, int, error)
+</pre>
+
+#### Cgroup
+
+A cgroup instance is responsible for create a new cgroup and deleting it when required. 
+
+<pre>
+type CGroupV2 struct {
+    Path string // e.g. /sys/fs/cgroup/lpaas/<jobID>
+}
+
+func NewCGroupV2(jobID string) (*CGroupV2, error)
+func (cg *CGroupV2) SetLimits() error
+func (cg *CGroupV2) Delete() error
+</pre>
+
+Please note this is a rough structure and might change a little but essence remains same.
 
 
 ### Authentication
@@ -325,7 +480,7 @@ In order to maintain simplicity and achieve the goal of smallest possible scope 
 
 1. In the library part of the challenge, the information about the owner and its jobs is stored in-memory inside a map. In a production system, this would be replaced by a persistent RBAC (Role-Based Access Control) layer backed by a secure datastore with audit logging.
 
-2. If time permits, I will be adding logging to the entire codebase. I will be using [logrus](https://github.com/sirupsen/logrus).
+2. If time permits, I will be adding logging to the entire codebase. I will be using [log/slog](https://pkg.go.dev/log/slog).
 
 3. For the scope of this challenge, I am assuming the the underlying host has cgroups v2 and the root cgroup has CPU Memory and Disk IO controllers enabled. Hardcoded the limits for now. In a production system, these would be configurable via environment variables or API inputs.
 
