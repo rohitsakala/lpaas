@@ -102,6 +102,7 @@ The following are the limits used and are harcoded for simplicity.
 
 <pre>
 cmd.SysProcAttr.CgroupFD = cgroupFD
+cmd.SysProcAttr.UseCgroupFD = true
 </pre>
 
 3. Delete : This function will send kill signals to all the processes in the `cgroup.procs` file making sure that all processes are killed and at last delete the cgroup directory. This function will be called by the JobManager when the client requests to stop the job.
