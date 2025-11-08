@@ -34,29 +34,7 @@ To support streaming, both stdout and stderr are written to two destinations usi
 
 ###### Streaming a Job
 
-1. I will maintain a list of clients for streaming. Each client will have a buffered channel. 
-
-2. When the job starts, I will start a goroutine (broadcaster) to read from the main `io.Pipe` (where stdout and stderr are written) and write the data into the buffered channels of each client in non blocking way. If the channel gets full due to a slow reader, only that reader is effected.
-
-3. If the job has already exited, I wouldn't use the channel instead, a reader over the buffer (outbuf) contents is passed on to the API server to stream them.
-
-4. If the job is still running, I add the client to the list and so the broadcaster goroutine reads from the main process pipe and distributes each chunk to all active consumer's channels. This ensures that every connected client receives real-time output from the process as it is produced. Before sending the live output stream, I ensure I send the snapshot of `outbuf` and then stream though a struct which implement io.Reader().
-
-6. When the job finishes (cmd.Wait() returns), all consumer channels and the main process pipe are closed. This cleanly signals an EOF to the gRPC server, which stops streaming once all output has been delivered.
-
-7. In the case of streaming, the API server will deal with the Job directly after getting the Job instance from the Job manager.
-
-I have used `io.Pipe` since it is Go’s built-in in-memory stream that directly connects a writer and reader without using files or sockets. It satisfies the challenge requirement because it’s fully event-driven. 
-
-
-![Streaming Logs](images/stream.png)
-
-
-###### Streaming internals (Golang)
-
-The following pseudocode illustrates how process output flows through the in-memory pipeline and is broadcasted to multiple concurrent consumers using Go channels and pipes. Please note that the pseudocode snippets is not real Golang code,is trimmed and is only added for the purpose of understanding.
-
-1. Before the job starts, I create a main pipe and `outbuf` and write process outputs into them.
+1. Each job maintains a single shared, `outbuf` buffer that stores all process ouput from the moment the job starts. As per above, the stdout and stderr are written to `outbuf` and an `io.Pipe`. Here's the pseudocode snippet:
 
 <pre>
 pr, pw := io.Pipe()
@@ -68,73 +46,78 @@ cmd.Stdout = mw
 cmd.Stderr = mw
 </pre>
 
-2. Before the job starts, I also start a broadcaster to send output logs to all active consumer's buffered channels in a non blocking way.
+2. When the job starts, both stdout and stderr of the process are connected to an io.MultiWriter that writes into outBuf and an in-memory io.Pipe. The io.Pipe exists only to detect when new data arrives. The actual bytes are already stored in outBuf.
+
+3. This detection is needed in the `broadcaster` goroutine which I start for every job. The broadcaster goroutine's responsibility is to send a non-blocking signal on a small buffered channel (job.newData).
 
 <pre>
+	for {
+		n, err := j.mainReader.Read(buf)
+		if n > 0 {
+			select {
+			case j.newData <- struct{}{}:
+			default:
+			}
+		}
+</pre>
+
+4. When a client requests for streaming, I will create an instance of an `streamingReader` struct which implements `io.Reader` which looks like this
+
+<pre>
+type streamingReader struct {
+	job    *Job
+	offset int
+}
+</pre>
+
+5. The `Read()` func of this `streamingReader`  first checks if there is any unread data in outBuf (based on its offset). If so, it copies that data into the provided buffer and advances the offset. If the client has caught up with the `outbuf`, it waits efficiently on the `job.newData` channel until the broadcaster goroutine signals that more data is available.
+
+6. If the job is completed (it gets to know using another channel named `job.Done`) and all data has been consumed, it returns io.EOF.
+
+<pre>
+func (r *streamingReader) Read(p []byte) (int, error) {
+	for {
+    // Send data from outbuf first.
+		data := r.job.outBuf.Bytes()
+		if r.offset < len(data) {
+			n := copy(p, data[r.offset:])
+			r.offset += n
+			return n, nil
+		}
+
+		// checks either for job done or newdata.
+		select {
+		case <-r.job.done:
+			// recheck buffer one last time and then return.
+			return 0, io.EOF
+
+		// wait for new data
+		case <-r.job.newData:
+			continue
+		}
+	}
+}
+</pre>
+
+7. When the job finishes (cmd.Wait() returns), the job makes `job.done` as closed and then the broadcaster goroutine exits and the readers as well.
+
+8. In the case of streaming, the API server will deal with the Job directly after getting the Job instance from the Job manager. The API sever would read from the reader in the following manner.
+
+<pre>
+reader := job.Stream()
 for {
-  chunk := j.mainReader.Read(buf)
-  for _, s := range j.consumers {
-    select {
-      case s.ch <- chunk:
-      default:
-        // slow reader: drop for this consumer, don't block others
-    }
-  }
-}
-</pre>
-
-3. Then the job starts and everything goes on. Later, when some client/consumer wants to request streaming, they are added to the list of consumers and a struct which implements io.Reader is created for them and reader is sent to the GRPC server.
-
-<pre>
-snapshot := bytes.NewReader(j.outBuf.Bytes()) // capture log till now
-j.consumers = append(j.consumers, consumer) // add to the consumers list
-
-// reader that will: 1) read snapshot, 2) read from channel
-r := &streamingReader{
-	snapshot: snapshot,
-	consumer: consumer,
-}
-
-return r
-}
-</pre>
-
-4. Before we go through how GRPC server reads it, lets understand the read function of the streamingReader
-
-<pre>
-func Read(p []byte) (int, error) {
-  // Send the snapshot of outbuf first
-  n, err := r.snapshot.Read(p)
-  if err == io.EOF {
-    r.snapshot = nil // move to live streaming
-  }
+  n, err := reader.Read(buf)
   if n > 0 {
-    return n, nil
+    stream.Send(buf[:n])
   }
-
-  // then steam live chunks
-  select {
-  case data, ok := <-r.consumer.ch:
-    n := copy(p, data)
-    return n, nil
-  case <-r.consumer.done:
-    return 0, io.EOF
+  if err == io.EOF {
+    break
+  }
 }
 </pre>
 
-5. Now, the GRPC server reads from the reader and sends the chunks to the client.
 
-<pre>
-  for {
-    n, err := reader.Read(buf)
-    if n > 0 {
-      stream.Send(buf[:n])
-    }
-    if err == io.EOF {
-      return nil
-    }
-  }
-</pre>
+![Streaming Logs](images/stream.png)
 
 
 ###### Stop Job
