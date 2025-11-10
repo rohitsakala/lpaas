@@ -28,40 +28,34 @@ This struct is responsible for all operations related to a Linux job — startin
 ###### Start Job
 This function will be using `exec` library to start the command with its args. Before starting, it will place the system attributes of the cmd process into its own cgroup. The cgroup will be created by the Job manager for each Job. See [Job Manager](#job-manager), [Cgroups](#cgroups) for more details.
 
-To support streaming, both stdout and stderr are written to two destinations using io.MultiWriter:
-1. an in-memory byte buffer (outBuf) for replay, and
-2. the writer end of an `io.Pipe`, which enables live streaming to consumers.
 
 ###### Streaming a Job
 
-1. Each job maintains a single shared, `outbuf` buffer that stores all process ouput from the moment the job starts. As per above, the stdout and stderr are written to `outbuf` and an `io.Pipe`. Here's the pseudocode snippet:
+1. Each job maintains a single shared `outBuf` buffer that stores all process output from the moment the job starts. In the `Start` method, both `stdout` and `stderr` of the process are written to a custom `io.Writer`. This custom writer appends all bytes to the `outBuf` and also sends a lightweight, non-blocking signal on a channel (`job.newData`) to notify any streaming clients that new data has arrived.
+
+2. The following pseudocode shows how `stdout` and `stderr` are connected to the custom writer at job startup:
 
 <pre>
-pr, pw := io.Pipe()
-j.mainReader, j.mainWriter = pr, pw
+writer := notifyingWriter{job: j}
 
-// write process output to: 1) in-memory buffer, 2) master pipe
-mw := io.MultiWriter(j.outBuf, pw)
-cmd.Stdout = mw
-cmd.Stderr = mw
+cmd.Stdout = writer
+cmd.Stderr = writer
 </pre>
 
-2. When the job starts, both stdout and stderr of the process are connected to an io.MultiWriter that writes into outBuf and an in-memory io.Pipe. The io.Pipe exists only to detect when new data arrives. The actual bytes are already stored in outBuf.
-
-3. This detection is needed in the `broadcaster` goroutine which I start for every job. The broadcaster goroutine's responsibility is to send a non-blocking signal on a small buffered channel (job.newData).
+3. The notifyingWriter implements io.Writer. Each time the process writes data, it appends the bytes to the in-memory outBuf and then sends a non-blocking signal to job.newData to wake up any waiting readers.
 
 <pre>
-	for {
-		n, err := j.mainReader.Read(buf)
-		if n > 0 {
-			select {
-			case j.newData <- struct{}{}:
-			default:
-			}
-		}
+func (w *notifyingWriter) Write(p []byte) (int, error) {
+  n, err := w.job.outBuf.Write(p)
+  select {
+    case w.job.newData <- struct{}{}:
+    default:
+  }
+  return n, err
+}
 </pre>
 
-4. When a client requests for streaming, I will create an instance of an `streamingReader` struct which implements `io.Reader` which looks like this
+4. When a client requests streaming, the job creates an instance of a `streamingReader` struct which implements `io.Reader`:
 
 <pre>
 type streamingReader struct {
