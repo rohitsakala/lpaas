@@ -23,7 +23,7 @@ The solution for this challenge will contain multiple components and I will be e
 
 ##### Job
 
-This struct is responsible for all operations related to a Linux job — starting the process, stopping it, and streaming its output. It represents the core logic of the system and is invoked by both the gRPC server and the Job Manager. Each job has a unique ID and uses Go’s `io.Pipe` to stream output efficiently (producer–consumer style).
+This struct is responsible for all operations related to a Linux job — starting the process, stopping it, and streaming its output. It represents the core logic of the system and is invoked by both the gRPC server and the Job Manager. Each job has a unique ID and uses Go’s `io.Writer` and `io.Reader` to stream output efficiently.
 
 ###### Start Job
 This function will be using `exec` library to start the command with its args. Before starting, it will place the system attributes of the cmd process into its own cgroup. The cgroup will be created by the Job manager for each Job. See [Job Manager](#job-manager), [Cgroups](#cgroups) for more details.
@@ -70,26 +70,26 @@ type streamingReader struct {
 
 <pre>
 func (r *streamingReader) Read(p []byte) (int, error) {
-	for {
+  for {
     // Send data from outbuf first.
-		data := r.job.outBuf.Bytes()
-		if r.offset < len(data) {
-			n := copy(p, data[r.offset:])
-			r.offset += n
-			return n, nil
-		}
+    data := r.job.outBuf.Bytes()
+    if r.offset < len(data) {
+      n := copy(p, data[r.offset:])
+      r.offset += n
+      return n, nil
+    }
 
 		// checks either for job done or newdata.
-		select {
-		case <-r.job.done:
-			// recheck buffer one last time and then return.
-			return 0, io.EOF
+    select {
+      case <-r.job.done:
+      // recheck buffer one last time and then return.
+      return 0, io.EOF
 
-		// wait for new data
-		case <-r.job.newData:
-			continue
-		}
-	}
+      // wait for new data
+      case <-r.job.newData:
+        continue
+    }
+  }
 }
 </pre>
 
@@ -173,7 +173,7 @@ cmd.SysProcAttr.CgroupFD = cgroupFD
 cmd.SysProcAttr.UseCgroupFD = true
 </pre>
 
-3. Delete : This function will send kill signals to all the processes in the `cgroup.procs` file making sure that all processes are killed and at last delete the cgroup directory. This function will be called by the JobManager when the client requests to stop the job.
+3. Delete: This function will terminate all processes in the cgroup by writing 1 to the cgroup.kill file. This ensures that the kernel sends a SIGKILL to every process in the cgroup atomically. After confirming all processes are terminated, the function will remove the corresponding cgroup directory. This function is invoked by the JobManager when a client requests to stop a job.
 
 #### Client
 
@@ -383,10 +383,6 @@ type Job struct {
     Command string
     Args    []string
     outBuf *bytes.Buffer
-
-    mainReader *io.PipeReader
-    mainWriter *io.PipeWriter
-    consumers []*consumer // Has its own buffered channel
 }
 
 func (j *Job) Start(ctx context.Context, cgroupFD int) error
