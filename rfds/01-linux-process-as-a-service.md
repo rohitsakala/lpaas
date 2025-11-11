@@ -8,14 +8,13 @@ state: Draft
 * Engineering: (@russjones || @zmb3 || @r0mant || @rosstimothy || @nklaassen || @joerger)
 ```
 
-### What 
+### What
 
 This RFD proposes a design for the Level 5 Teleport Systems Engineering Challenge, as described in the [challenge specification](https://github.com/gravitational/careers/blob/main/challenges/systems/challenge-1.md)
 
 ### Design 
 
 The solution for this challenge will contain multiple components and I will be explaining the responsibilities and the logic behind each responsibility in the following sections. The components are JobManager, GRPC Server, Cgroup struct, Client CLI and Job struct. Following is a simple flow diagram to show the interactions between the components.
-
 
 ![Flow diagram showing how the JobManager, gRPC service, Job struct, Client CLI, and Cgroup operations interact](images/overview.png)
 
@@ -31,44 +30,49 @@ This function will be using `exec` library to start the command with its args. B
 
 ###### Streaming a Job
 
-1. Each job maintains a single shared `outBuf` buffer that stores all process output from the moment the job starts. In the `Start` method, both `stdout` and `stderr` of the process are written to a custom `io.Writer`. This custom writer appends all bytes to the `outBuf` and also sends a lightweight, non-blocking signal on a channel (`job.newData`) to notify any streaming clients that new data has arrived.
+Note: All the below snippets are pesudocode's.
+
+1. Each job maintains a single shared `outBuf` buffer that stores all process output from the moment the job starts. In the `Start` method, both `stdout` and `stderr` of the process are written to a custom `io.Writer`. This custom writer appends all bytes to the `outBuf` and also sends a lightweight, non-blocking signal on a channel (`reader.newData`) to notify any streaming clients that new data has arrived. Each reader has a channel.
 
 2. The following pseudocode shows how `stdout` and `stderr` are connected to the custom writer at job startup:
 
-<pre>
+```
 writer := notifyingWriter{job: j}
 
 cmd.Stdout = writer
 cmd.Stderr = writer
-</pre>
+```
 
-3. The notifyingWriter implements io.Writer. Each time the process writes data, it appends the bytes to the in-memory outBuf and then sends a non-blocking signal to job.newData to wake up any waiting readers.
+3. The notifyingWriter implements io.Writer. Each time the process writes data, it appends the bytes to the in-memory outBuf and then sends a non-blocking signal to all reader.newData to wake up any waiting readers.
 
-<pre>
+```
 func (w *notifyingWriter) Write(p []byte) (int, error) {
   n, err := w.job.outBuf.Write(p)
-  select {
-    case w.job.newData <- struct{}{}:
-    default:
+  for _, ch := range w.job.readers {
+    select {
+      case w.job.newData <- struct{}{}:
+      default:
+    }
   }
   return n, err
 }
-</pre>
+```
 
 4. When a client requests streaming, the job creates an instance of a `streamingReader` struct which implements `io.Reader`:
 
-<pre>
+```
 type streamingReader struct {
 	job    *Job
 	offset int
+  newData chan struct{}
 }
-</pre>
+```
 
-5. The `Read()` func of this `streamingReader`  first checks if there is any unread data in outBuf (based on its offset). If so, it copies that data into the provided buffer and advances the offset. If the client has caught up with the `outbuf`, it waits efficiently on the `job.newData` channel until the broadcaster goroutine signals that more data is available.
+5. The `Read()` func of this `streamingReader`  first checks if there is any unread data in outBuf (based on its offset). If so, it copies that data into the provided buffer and advances the offset. If the client has caught up with the `outbuf`, it waits efficiently on the `r.newData` channel until the `notifyingWriter` notifies about new data.
 
-6. If the job is completed (it gets to know using another channel named `job.Done`) and all data has been consumed, it returns io.EOF.
+6. If the job is completed (it gets to know through the shared job.done channel) and all data has been consumed, the reader returns io.EOF. Separately, when the job finishes (cmd.Wait() returns), it closes job.done and sends non-blocking signals on all active readers’ newData channels to wake them up and avoid race conditions.
 
-<pre>
+```
 func (r *streamingReader) Read(p []byte) (int, error) {
   for {
     // Send data from outbuf first.
@@ -86,18 +90,16 @@ func (r *streamingReader) Read(p []byte) (int, error) {
       return 0, io.EOF
 
       // wait for new data
-      case <-r.job.newData:
+      case <-r.newData:
         continue
     }
   }
 }
-</pre>
+```
 
-7. When the job finishes (cmd.Wait() returns), the job makes `job.done` as closed and then the broadcaster goroutine exits and the readers as well.
+7. In the case of streaming, the API server will deal with the Job directly after getting the Job instance from the Job manager. The API sever would read from the reader in the following manner.
 
-8. In the case of streaming, the API server will deal with the Job directly after getting the Job instance from the Job manager. The API sever would read from the reader in the following manner.
-
-<pre>
+```
 reader := job.Stream()
 for {
   n, err := reader.Read(buf)
@@ -108,7 +110,7 @@ for {
     break
   }
 }
-</pre>
+```
 
 
 ![Streaming Logs](images/stream.png)
@@ -116,16 +118,13 @@ for {
 
 ###### Stop Job
 
-This function terminates a running job by first canceling its context (which signals the process to exit) and then sending a SIGTERM to the entire process group, ensuring all child processes are also stopped. Creating a process group is like an additional measure to ensure child processes are also stopped in addition cleaning cgroup. See [Cgroups](#cgroups) for more details.  If successful, the job’s status is updated to Stopped; otherwise, any system error (like failure to send the signal) is returned. This will be a synchrounous operation.
+This function terminates a running job by first canceling its context (which signals the process to exit). I also write `1` to the cgroups.kill file. See [Cgroups](#cgroups) for more details.  If successful, the job’s status is updated to Stopped; otherwise, any system error (like failure to send the signal) is returned. This will be a blocking operation.
 
 ###### Status Job
 
 The status of the job will contain the status phrase i.e Running or stopped etc. It will also contain the exit code and error message. The status phrase of the job is changed appropriately at all the places needed.
 
-
-Note: I think many parts of the codebase especially in Jobs requires using `mutexes` to avoid data races. The entire codebase would also need `context` to make sure goroutines are terminated properly. I cannot envision how I will be using them but I will use them appropriately to avoid data races, deadlocks or goroutines leaks. 
-
-<pre>
+```
 const (
   // Pending will be the first status
 	JobStatusPending JobStatus = iota
@@ -138,15 +137,17 @@ const (
   // Failed is when the process has failed
 	JobStatusFailed
 )
-</pre>
+```
+
+Note: I think many parts of the codebase especially in Jobs requires using `mutexes` to avoid data races. The entire codebase would also need `context` to make sure goroutines are terminated properly. I cannot envision how I will be using them but I will use them appropriately to avoid data races, deadlocks or goroutines leaks.
 
 ##### Job Manager
 
 This will be a struct which will be responsible for all the operations that the API server would like to perform. This struct will be a bridge between the API server and job/cgroup structs. I will be maintaining a jobManager per client. The following are the Jobmanager's responsibilities:
 
 1. It maintains one map : A map of job ids and its job structs.
-2. When the API server tells the Job manager to start a job, the job manager will take care of creating a unique job id using [uuid](https://github.com/google/uuid) package, creating the cgroup directory for the job and fetching file descriptor of it and invoking the job start function with the `fd`. This will probably be an asynchronous operation.
-3. Similary for stopping a job, the Job manager will call the stop function of job and make sure of deleting the cgroup directory for that job. This will be a synchronous function.
+2. When the API server tells the Job manager to start a job, the job manager will take care of creating a unique job id using [uuid](https://github.com/google/uuid) package, creating the cgroup directory for the job and fetching file descriptor of it and invoking the job start function with the `fd`. This will probably be an non blocking operation. Non blocking means that the API call will return immediately after launching the process, without waiting for the process to complete.
+3. Similary for stopping a job, the Job manager will call the stop function of job and make sure of deleting the cgroup directory for that job. This will be a blocking function.
 4. It is also responsible for returning the Job struct based on ID whenever requested by the API server.
 
 
@@ -168,10 +169,10 @@ The following are the limits used and are harcoded for simplicity.
 
 2. Placing a Job into its Cgroup : Each Linux job is placed into its own dedicated cgroup under `/sys/fs/cgroup/lpaas/<jobID>` using the `clone3()` system call via Go’s runtime. Before starting the job with `cmd.Start()`, I will be fetching the file descriptor of the cgroup directory and that file descriptor is then assigned to the process’ system attributes
 
-<pre>
+```
 cmd.SysProcAttr.CgroupFD = cgroupFD
 cmd.SysProcAttr.UseCgroupFD = true
-</pre>
+```
 
 3. Delete: This function will terminate all processes in the cgroup by writing 1 to the cgroup.kill file. This ensures that the kernel sends a SIGKILL to every process in the cgroup atomically. After confirming all processes are terminated, the function will remove the corresponding cgroup directory. This function is invoked by the JobManager when a client requests to stop a job.
 
@@ -181,20 +182,20 @@ Client will be a CLI which will connect to the GRPC API server. I will be using 
 
 The CLI will have the following global flags:
 
-<pre>
+```
 Flags:
       --addr string   Server gRPC address (default "localhost:8443")
       --ca string     CA certificate (default "certs/ca.crt")
       --cert string   Client certificate (default "certs/client.crt")
   -h, --help          help for lpaas
       --key string    Client private key (default "certs/client.key")
-</pre>
+```
 
 The CLI will have the following sub commands:
 
 ##### Start 
 
-<pre>
+```
 Start a new linux process job on the lpaas
 
 Usage:
@@ -202,18 +203,18 @@ Usage:
 
 Flags:
   -h, --help   help for start
-</pre>
+```
 
 ##### Examples 
 
-<pre>
+```
 lpaas start -- curl http://www.google.com -O
 lpaas start --addr localhost:8443 -- echo teleport
-</pre>
+```
 
 ##### Stop 
 
-<pre>
+```
 Stop a running job on the lpaas
 
 Usage:
@@ -221,17 +222,17 @@ Usage:
 
 Flags:
   -h, --help   help for stop
-</pre>
+```
 
 ##### Examples
 
-<pre>
+```
 lpaas stop job-97dd115d-887d-4b8b-b746-59246e8d0ebf
-</pre>
+```
 
 ##### Stream Logs
 
-<pre>
+```
 Log the complete output of a running or completed job of lpaas
 
 Usage:
@@ -239,17 +240,17 @@ Usage:
 
 Flags:
   -h, --help   help for stream-logs
-</pre>
+```
 
 ##### Examples
 
-<pre>
+```
 lpaas stream-logs job-97dd115d-887d-4b8b-b746-59246e8d0ebf
-</pre>
+```
 
 ##### Status 
 
-<pre>
+```
 Get the current status of a linux job process of lpaas
 
 Usage:
@@ -257,13 +258,13 @@ Usage:
 
 Flags:
   -h, --help   help for status
-</pre>
+```
 
 ##### Examples
 
-<pre>
+```
 lpaas status job-97dd115d-887d-4b8b-b746-59246e8d0ebf
-</pre>
+```
 
 #### gRPC API Server
 
@@ -275,7 +276,7 @@ The gRPC API server is responsible to maintining the ownership of the jobmanager
 This component will expose a gRPC API server that uses Protocol Buffers for both requests and responses. The API will be versioned with the initial version being v1alpha1.
 The .proto file defines the Lpaas service and its RPCs:
 
-<pre>
+```
 // Lpaas (Linux Process as a Service)
 // Provides a gRPC API for starting, stopping, monitoring,
 // and streaming output from Linux processes managed by the server.
@@ -351,16 +352,18 @@ message StreamChunk {
 }
 
 // Empty message for StopJobResponse
-message StopJobResponse {}
-</pre>
+message StoopJbResponse {}
+```
 
 ### GO Library API
+
+I plan to expose both JobManager and Job since some may want to use just the Job only.
 
 #### JobManager
 
 A JobManager manages a set of Linux jobs for a single authenticated user. A job manager instance is created per client.
 
-<pre>
+```
 type JobManager struct {
     // Create track Linux jobs.
     jobs map[string]*Job
@@ -371,42 +374,45 @@ func (m *JobManager) StartJob(command string, args ...string) (string, error)
 func (m *JobManager) StopJob(id string) error
 func (m *JobManager) GetJob(id string) (*Job, error)
 func (m *JobManager) Status(id string) (JobStatus, int, error)
-</pre>
+```
 
 #### Job
 
-A job is responsible for start a linux process and other related activities such as stop, status and streaming.
+A job is responsible to start a linux process and other related activities such as stop, status and streaming.
 
-<pre>
+```
 type Job struct {
     ID      string
     Command string
     Args    []string
     outBuf *bytes.Buffer
+    readers map[*streamingReader]chan struct{}
+    done    chan struct{}
 }
 
 func (j *Job) Start(ctx context.Context, cgroupFD int) error
 func (j *Job) Stop() error
 func (j *Job) Stream() io.ReadCloser
 func (j *Job) StatusSnapshot() (JobStatus, int, error)
-</pre>
+````
 
 #### Cgroup
 
 A cgroup instance is responsible for create a new cgroup and deleting it when required. 
 
-<pre>
+```
 type CGroupV2 struct {
-    Path string // e.g. /sys/fs/cgroup/lpaas/<jobID>
+    // e.g. /sys/fs/cgroup/lpaas/jobID
+    Path string 
 }
 
 func NewCGroupV2(jobID string) (*CGroupV2, error)
 func (cg *CGroupV2) SetLimits() error
 func (cg *CGroupV2) Delete() error
-</pre>
+```
 
-Please note this is a rough structure and might change a little but essence remains same.
 
+Note: This is a rough structure and might change a little but essence remains same.
 
 ### Authentication
 
@@ -418,26 +424,28 @@ I am planning to use mTLS as authentication and fetching the username from the C
 
 2. To enable mTLS between server and the client, I have used the following field value in the TLS config struct at server side:
 
-<pre> tls.Config{ ClientAuth: tls.RequireAndVerifyClientCert } </pre>
+```
+tls.Config{ ClientAuth: tls.RequireAndVerifyClientCert }
+```
 
 3. The certificates for mTLS (both server and client) must be pre-generated and placed in the certs/ directory. A Makefile will be provided to automatically generate these certificates. For the purpose of this challenge, a single Certificate Authority (CA) will be used, and its certificate will be trusted by both the server and the client. I will use ECDSA P-256 certificates generated via the OpenSSL CLI. I will implement as follows:
 
-<pre> 
+```
 # CA cert
 make ca-cert
 
-# Server cert,
+# Server cert
 make server-cert
 
-# Client cert,
+# Client cert
 make client-cert USER=rohit # CN of the certificate will be rohit.
-</pre>
+```
 
 ### Authorization
 
 1. The authorization scheme will be very simple. The client who created the job will be the only one to have the control over the job i.e to stop the job, stream logs and query the status of the job. 
 
-2. The Job manager will have the information about the jobs and its owners and it will be stored inside a map data structure. The owner is captured from the certificate in the GRPC component and validation will also be done in this component before invoking any of the functions of Job manager. 
+2. The API Server will have the information about the JobManager and its owners. Each client/owner will have a single Job Manager and it will be stored inside a map data structure in API Server. The owner is captured from the certificate in the GRPC component and validation will also be done in this component before invoking any of the functions of Job manager. 
 
 
 | gRPC Method     | Access Policy                          |
