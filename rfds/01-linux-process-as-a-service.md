@@ -97,7 +97,7 @@ func (r *streamingReader) Read(p []byte) (int, error) {
 }
 ```
 
-7. In the case of streaming, the API server will deal with the Job directly after getting the Job instance from the Job manager. The API sever would read from the reader in the following manner.
+7. In the case of streaming, the API server will ask the Jobmanager for a reader. The Jobmanager will return a `io.ReadCloser` to the APIServer.The API sever would read from the reader in the following manner.
 
 ```
 reader := job.Stream()
@@ -371,9 +371,9 @@ type JobManager struct {
 
 func NewJobManager() *JobManager
 func (m *JobManager) StartJob(command string, args ...string) (string, error)
-func (m *JobManager) StopJob(id string) error
-func (m *JobManager) GetJob(id string) (*Job, error)
-func (m *JobManager) Status(id string) (JobStatus, int, error)
+func (m *JobManager) StopJob(jobID string) error
+func (m *JobManager) StreamJob(jobID string) (io.ReadCloser, error) {
+func (m *JobManager) Status(jobID string) (JobStatus, int, error)
 ```
 
 #### Job
