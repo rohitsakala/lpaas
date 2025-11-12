@@ -50,7 +50,7 @@ func (w *notifyingWriter) Write(p []byte) (int, error) {
   n, err := w.job.outBuf.Write(p)
   for _, ch := range w.job.readers {
     select {
-      case w.job.newData <- struct{}{}:
+      case ch <- struct{}{}:
       default:
     }
   }
@@ -62,7 +62,7 @@ func (w *notifyingWriter) Write(p []byte) (int, error) {
 
 ```
 type streamingReader struct {
-	job    *Job
+	job    *job
 	offset int
   newData chan struct{}
 }
@@ -127,15 +127,15 @@ The status of the job will contain the status phrase i.e Running or stopped etc.
 ```
 const (
   // Pending will be the first status
-	JobStatusPending JobStatus = iota
+  jobStatusPending JobStatus = iota
   // Running is when the linux process is running
-	JobStatusRunning
+  jobStatusRunning
   // Stopped is when the client has requested to stop a running process
-	JobStatusStopped
+  jobStatusStopped
   // Exited is when the process exited itself
-	JobStatusExited
+  jobStatusExited
   // Failed is when the process has failed
-	JobStatusFailed
+  jobStatusFailed
 )
 ```
 
@@ -357,8 +357,6 @@ message StoopJbResponse {}
 
 ### GO Library API
 
-I plan to expose both JobManager and Job since some may want to use just the Job only.
-
 #### JobManager
 
 A JobManager manages a set of Linux jobs for a single authenticated user. A job manager instance is created per client.
@@ -381,20 +379,20 @@ func (m *JobManager) Status(jobID string) (JobStatus, int, error)
 A job is responsible to start a linux process and other related activities such as stop, status and streaming.
 
 ```
-type Job struct {
-    ID      string
-    Command string
-    Args    []string
-    outBuf *bytes.Buffer
-    readers map[*streamingReader]chan struct{}
-    done    chan struct{}
+type job struct {
+    id       string
+    command  string
+    args     []string
+    outBuf   *bytes.Buffer
+    readers  map[*streamingReader]chan struct{}
+    done     chan struct{}
 }
 
-func (j *Job) Start(ctx context.Context, cgroupFD int) error
-func (j *Job) Stop() error
-func (j *Job) Stream() io.ReadCloser
-func (j *Job) StatusSnapshot() (JobStatus, int, error)
-````
+func (j *job) start(ctx context.Context, cgroupFD int) error
+func (j *job) stop() error
+func (j *job) stream() io.ReadCloser
+func (j *job) statusSnapshot() (JobStatus, int, error)
+```
 
 #### Cgroup
 
