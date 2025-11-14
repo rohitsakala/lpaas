@@ -126,16 +126,15 @@ The status of the job will contain the status phrase i.e Running or stopped etc.
 
 ```
 const (
-  // Pending will be the first status
-  jobStatusPending JobStatus = iota
-  // Running is when the linux process is running
-  jobStatusRunning
-  // Stopped is when the client has requested to stop a running process
-  jobStatusStopped
-  // Exited is when the process exited itself
-  jobStatusExited
-  // Failed is when the process has failed
-  jobStatusFailed
+	unknown status = iota
+  // running is when the linux process is running
+	running
+  // stopped is when the client has requested to stop a running process
+	stopped
+  // exited is when the process exited itself
+	exited
+  // failed is when the process has failed
+	failed
 )
 ```
 
