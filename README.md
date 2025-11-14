@@ -31,6 +31,12 @@ make client-certs USER=rohit
 go run ./server/server.go
 ```
 
+3. Build the client by the make target 
+
+```
+make build-client
+```
+
 ### TODO/Future Work
 
 - Update RFD after implementation review.
