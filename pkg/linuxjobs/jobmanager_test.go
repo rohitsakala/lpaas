@@ -17,7 +17,7 @@ func TestNewJobManager(t *testing.T) {
 func TestJob_ExistingJob(t *testing.T) {
 	jm := &JobManager{jobs: make(map[string]*job)}
 
-	j := newJob("job-1", "echo")
+	j := newTestJob()
 	jm.jobs["job-1"] = j
 
 	exists := jm.JobExists("job-1")
@@ -60,10 +60,9 @@ func TestStreamJob_NotFound(t *testing.T) {
 }
 
 func TestStatus_ReturnsValues(t *testing.T) {
-	j := newJob("job-1", "echo")
+	j := newTestJob()
 	j.status = exited
 	j.exitCode = 0
-	j.exitErr = nil
 
 	jm := &JobManager{jobs: map[string]*job{
 		"job-1": j,
@@ -82,7 +81,7 @@ func TestStatus_ReturnsValues(t *testing.T) {
 }
 
 func TestStreamJob_ReturnsReader(t *testing.T) {
-	j := newJob("job-1", "echo")
+	j := newTestJob()
 	j.status = running
 
 	jm := &JobManager{jobs: map[string]*job{

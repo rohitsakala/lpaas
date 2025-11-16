@@ -2,7 +2,6 @@ package linuxjobs
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"os/exec"
@@ -11,7 +10,8 @@ import (
 
 // newTestJob is a small helper to avoid repeating boilerplate.
 func newTestJob() *job {
-	return newJob("job-1", "echo", "hi")
+	j, _ := newJob("job-1", "echo", "hi")
+	return j
 }
 
 type fakeCGroup struct {
@@ -22,6 +22,10 @@ type fakeCGroup struct {
 func (f *fakeCGroup) delete() error {
 	f.deleteCalled = true
 	return f.deleteErr
+}
+
+func (f *fakeCGroup) openFD() (int, error) {
+	return 0, nil
 }
 
 func TestNewJob_InitialState(t *testing.T) {
@@ -51,28 +55,23 @@ func TestNewJob_InitialState(t *testing.T) {
 }
 
 func TestJobStop_HappyPath(t *testing.T) {
-	j := newTestJob()
+	j := &job{
+		status: running,
+		done:   make(chan struct{}),
+	}
 
-	j.status = running
-
-	// add cancel so stop() can call it safely
-	j.ctx, j.cancel = context.WithCancel(context.Background())
-
-	// add fake cgroup
-	fake := &fakeCGroup{}
-	j.cgroup = fake
+	// set a fake cancel that just closes done after being called
+	j.cancel = func() {
+		close(j.done)
+	}
 
 	err := j.stop()
 	if err != nil {
-		t.Fatalf("stop returned unexpected error: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !fake.deleteCalled {
-		t.Fatalf("expected cgroup.delete() to be called")
-	}
-
-	if j.status != stopped {
-		t.Fatalf("expected job status=stopped, got %v", j.status)
+	if j.status != running {
+		t.Fatalf("stop() should NOT modify status; got %v", j.status)
 	}
 }
 
@@ -138,7 +137,10 @@ func TestExitCodeFromErr_ExitError(t *testing.T) {
 
 func TestStreamingReader_ReadsAllDataAndEOF(t *testing.T) {
 	j := newTestJob()
-	j.outBuf = &lockedBuffer{b: bytes.NewBufferString("hello")}
+	j.outBuf = &lockedBuffer{
+		b: bytes.NewBufferString("hello"),
+		n: len("hello"),
+	}
 	j.done = make(chan struct{})
 	close(j.done) // simulate finished job
 
@@ -165,7 +167,10 @@ func TestStreamingReader_ReadsAllDataAndEOF(t *testing.T) {
 
 func TestStreamingReader_PartialReads(t *testing.T) {
 	j := newTestJob()
-	j.outBuf = &lockedBuffer{b: bytes.NewBufferString("hellodef")}
+	j.outBuf = &lockedBuffer{
+		b: bytes.NewBufferString("hellodef"),
+		n: len("hellodef"),
+	}
 	j.done = make(chan struct{})
 	close(j.done)
 
@@ -195,7 +200,10 @@ func TestStreamingReader_PartialReads(t *testing.T) {
 
 func TestStreamingReader_CloseRemovesReader(t *testing.T) {
 	j := newTestJob()
-	j.outBuf = &lockedBuffer{b: bytes.NewBufferString("data")}
+	j.outBuf = &lockedBuffer{
+		b: bytes.NewBufferString("data"),
+		n: len("data"),
+	}
 	j.done = make(chan struct{})
 
 	r := j.stream().(*streamingReader)
@@ -215,7 +223,10 @@ func TestStreamingReader_CloseRemovesReader(t *testing.T) {
 
 func TestNotifyingWriter_WritesAndNotifies(t *testing.T) {
 	j := newTestJob()
-	j.outBuf = &lockedBuffer{b: new(bytes.Buffer)}
+	j.outBuf = &lockedBuffer{
+		b: new(bytes.Buffer),
+		n: 0,
+	}
 	j.readers = make(map[*streamingReader]chan struct{})
 
 	ch := make(chan struct{}, 1)
@@ -253,7 +264,10 @@ func TestNotifyingWriter_WritesAndNotifies(t *testing.T) {
 
 func TestStream_ReturnsStaticReaderForCompletedJob(t *testing.T) {
 	j := newTestJob()
-	j.outBuf = &lockedBuffer{b: bytes.NewBufferString("final")}
+	j.outBuf = &lockedBuffer{
+		b: bytes.NewBufferString("final"),
+		n: len("final"),
+	}
 	j.status = exited
 
 	rc := j.stream()
