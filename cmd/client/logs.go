@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -23,7 +22,7 @@ var logsCmd = &cobra.Command{
 		}
 		defer conn.Close()
 
-		stream, err := client.StreamOutput(context.Background(), &pb.StreamRequest{Id: jobID})
+		stream, err := client.StreamOutput(cmd.Context(), &pb.StreamRequest{Id: jobID})
 		if err != nil {
 			return fmt.Errorf("stream start error: %w", err)
 		}

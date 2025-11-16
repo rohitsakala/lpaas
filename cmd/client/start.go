@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 
 	pb "github.com/rohitsakala/lpaas/api/gen/lpaas/v1alpha1"
@@ -19,7 +18,7 @@ var startCmd = &cobra.Command{
 		}
 		defer conn.Close()
 
-		resp, err := client.StartJob(context.Background(), &pb.StartJobRequest{
+		resp, err := client.StartJob(cmd.Context(), &pb.StartJobRequest{
 			Command: args[0],
 			Args:    args[1:],
 		})

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 
 	pb "github.com/rohitsakala/lpaas/api/gen/lpaas/v1alpha1"
@@ -22,7 +21,7 @@ var stopCmd = &cobra.Command{
 		}
 		defer conn.Close()
 
-		_, err = client.StopJob(context.Background(), &pb.JobRequest{Id: jobID})
+		_, err = client.StopJob(cmd.Context(), &pb.JobRequest{Id: jobID})
 		if err != nil {
 			return fmt.Errorf("failed to stop job: %w", err)
 		}

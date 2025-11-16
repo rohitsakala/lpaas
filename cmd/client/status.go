@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 
 	pb "github.com/rohitsakala/lpaas/api/gen/lpaas/v1alpha1"
@@ -21,7 +20,7 @@ var statusCmd = &cobra.Command{
 		}
 		defer conn.Close()
 
-		resp, err := client.GetStatus(context.Background(), &pb.JobRequest{Id: jobID})
+		resp, err := client.GetStatus(cmd.Context(), &pb.JobRequest{Id: jobID})
 		if err != nil {
 			return fmt.Errorf("failed to get status: %w", err)
 		}
