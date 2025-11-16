@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -31,7 +32,7 @@ func NewLpaasClient() (*grpc.ClientConn, pb.LpaasClient, error) {
 	}
 	certPool := x509.NewCertPool()
 	if !certPool.AppendCertsFromPEM(caPEM) {
-		return nil, nil, fmt.Errorf("failed adding CA certificate to pool")
+		return nil, nil, errors.New("failed adding CA certificate to pool")
 	}
 
 	serverName := "localhost"
