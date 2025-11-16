@@ -4,44 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"sync"
 
 	"github.com/google/uuid"
-	"golang.org/x/sys/unix"
 )
-
-var (
-	// cgroupInitOnce ensures the cgroup hierarchy is initialized only once.
-	cgroupInitOnce sync.Once
-)
-
-// initCgroupHierarchy sets up the LPaaS cgroup root and enables controllers.
-func initCgroupHierarchy() error {
-	// Create root /sys/fs/cgroup/lpaas
-	if err := os.MkdirAll(lpaasCgroupRoot, 0755); err != nil {
-		return fmt.Errorf("create cgroup root: %w", err)
-	}
-
-	// Enable controllers once
-	if err := enableControllers(cgroupRootPath); err != nil {
-		return err
-	}
-	if err := enableControllers(lpaasCgroupRoot); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// ensureCgroupHierarchy initializes the cgroup hierarchy once only.
-func ensureCgroupHierarchy() error {
-	var cgroupInitErr error
-	cgroupInitOnce.Do(func() {
-		cgroupInitErr = initCgroupHierarchy()
-	})
-	return cgroupInitErr
-}
 
 // newJobID returns a unique job identifier.
 func newJobID() string {
@@ -54,12 +20,8 @@ type JobManager struct {
 	mu   sync.Mutex
 }
 
-// NewJobManager creates a JobManager and initializes the cgroup hierarchy.
+// NewJobManager creates a JobManager with the map to hold jobs.
 func NewJobManager() (*JobManager, error) {
-	if err := ensureCgroupHierarchy(); err != nil {
-		return nil, fmt.Errorf("failed to initialize cgroup: %w", err)
-	}
-
 	return &JobManager{
 		jobs: make(map[string]*job),
 	}, nil
@@ -69,29 +31,15 @@ func NewJobManager() (*JobManager, error) {
 func (jm *JobManager) StartJob(command string, args ...string) (string, error) {
 	jobID := newJobID()
 
-	cg, err := newCGroupV2(jobID)
+	job, err := newJob(jobID, command, args...)
 	if err != nil {
-		return "", fmt.Errorf("create cgroup: %w", err)
+		return "", err
 	}
-	if err := cg.setLimits(); err != nil {
-		return "", fmt.Errorf("set limits: %w", err)
-	}
-
-	fd, err := cg.openFD()
-	if err != nil {
-		return "", fmt.Errorf("open cgroup FD: %w", err)
-	}
-
-	job := newJob(jobID, command, args...)
-	job.cgroup = cg
 
 	// Start job synchronously (internally spawns cmd.Wait goroutine)
-	if err := job.start(context.Background(), fd); err != nil {
-		unix.Close(fd)
+	if err := job.start(context.Background()); err != nil {
 		return "", fmt.Errorf("failed to start job %s: %w", jobID, err)
 	}
-
-	unix.Close(fd)
 
 	jm.mu.Lock()
 	jm.jobs[jobID] = job
