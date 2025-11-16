@@ -39,6 +39,6 @@ make build-client
 
 ### TODO/Future Work
 
-- Update RFD after implementation review.
+- Update RFD after implementation and implementation code review.
 - Add logging to the codebase.
 - Add race tests to run with `-race`.
