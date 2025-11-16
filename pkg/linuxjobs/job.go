@@ -229,6 +229,9 @@ func (r *streamingReader) Close() error {
 	r.job.mu.Lock()
 	delete(r.job.readers, r)
 	r.job.mu.Unlock()
+
+	close(r.newData)
+
 	return nil
 }
 
