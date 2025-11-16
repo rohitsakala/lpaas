@@ -27,16 +27,15 @@ func NewJobManager() (*JobManager, error) {
 	}, nil
 }
 
-// StartJob creates a job, configures its cgroup, and starts the process.
+// StartJob creates a job and starts running it.
 func (jm *JobManager) StartJob(command string, args ...string) (string, error) {
 	jobID := newJobID()
 
 	job, err := newJob(jobID, command, args...)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("create job: %w", err)
 	}
 
-	// Start job synchronously (internally spawns cmd.Wait goroutine)
 	if err := job.start(context.Background()); err != nil {
 		return "", fmt.Errorf("failed to start job %s: %w", jobID, err)
 	}
@@ -48,7 +47,7 @@ func (jm *JobManager) StartJob(command string, args ...string) (string, error) {
 	return job.ID, nil
 }
 
-// StopJob stops the job with the given ID.
+// StopJob calls the stop function of the job with the given ID.
 func (jm *JobManager) StopJob(jobID string) error {
 	jm.mu.Lock()
 	job, ok := jm.jobs[jobID]
@@ -64,14 +63,14 @@ func (jm *JobManager) StopJob(jobID string) error {
 	return nil
 }
 
-// Status returns the job's status, exit code (if any), and exit error.
+// Status returns the job's status, exit code (if any), and exit error (exit error will contain the cleanup error if any).
 func (jm *JobManager) Status(jobID string) (string, *int32, error) {
 	jm.mu.Lock()
 	job, ok := jm.jobs[jobID]
 	jm.mu.Unlock()
 
 	if !ok {
-		return "Unknown", nil, fmt.Errorf("job %s not found", jobID)
+		return "", nil, fmt.Errorf("job %s not found", jobID)
 	}
 
 	statusVal, code, jobErr := job.statusSnapshot()
@@ -93,7 +92,8 @@ func (jm *JobManager) JobExists(jobID string) bool {
 	return ok
 }
 
-// StreamJob returns an io.Reader that streams live and past output of a running job.
+// StreamJob returns an io.ReadCloser that streams live and past output of a running job.
+// The reader must be closed by the caller when no longer needed.
 func (jm *JobManager) StreamJob(jobID string) (io.ReadCloser, error) {
 	jm.mu.Lock()
 	job, ok := jm.jobs[jobID]
