@@ -118,13 +118,6 @@ func (j *job) start(ctx context.Context, cgroupFD int) error {
 		}
 		close(j.done)
 
-		// wake up all readers to let them know the job has finished to avoid race conditions.
-		for _, ch := range j.readers {
-			select {
-			case ch <- struct{}{}:
-			default:
-			}
-		}
 		j.mu.Unlock()
 
 	}()
