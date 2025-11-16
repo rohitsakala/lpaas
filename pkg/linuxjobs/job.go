@@ -73,7 +73,7 @@ type job struct {
 
 // newJob creates a new job instance with the given command and arguments.
 func newJob(id, cmd string, args ...string) (*job, error) {
-	cg, err := newCGroupV2(id)
+	cg, err := newCGroupV2(id, "")
 	if err != nil {
 		return nil, fmt.Errorf("create cgroup: %w", err)
 	}
@@ -94,6 +94,8 @@ func newJob(id, cmd string, args ...string) (*job, error) {
 }
 
 // Start begins execution of the job using its own cancellable context.
+// It sets up cgroup association and output capturing.
+// It spawns a goroutine to monitor job completion and update status accordingly.
 func (j *job) start(ctx context.Context) error {
 	jobContext, cancel := context.WithCancel(ctx)
 	j.cancel = cancel
@@ -177,7 +179,8 @@ func (j *job) statusSnapshot() (status, int, error) {
 	return j.status, j.exitCode, errors.Join(j.exitErr, j.cleanupErr)
 }
 
-// Stream creates a new reader for consuming job output.
+// Stream creates a new reader for consuming job output from the beginning.
+// If the job has already completed, it returns a reader over the complete output.
 func (j *job) stream() io.ReadCloser {
 	j.mu.Lock()
 	done := j.status == exited ||
@@ -206,6 +209,7 @@ type notifyingWriter struct {
 	job *job
 }
 
+// Write writes data to the job's output buffer and notifies readers about any new data.
 func (w *notifyingWriter) Write(p []byte) (int, error) {
 	n, err := w.job.outBuf.write(p)
 
@@ -229,6 +233,8 @@ type streamingReader struct {
 	newData chan struct{}
 }
 
+// Read reads data from the job's output buffer, blocking until new data is available or the job is done.
+// Read must be closed when no longer needed.
 func (r *streamingReader) Read(p []byte) (int, error) {
 	for {
 		total := r.job.outBuf.len()
@@ -251,6 +257,7 @@ func (r *streamingReader) Read(p []byte) (int, error) {
 	}
 }
 
+// Close unregisters the reader from the job and releases associated resources.
 func (r *streamingReader) Close() error {
 	r.job.mu.Lock()
 	delete(r.job.readers, r)
