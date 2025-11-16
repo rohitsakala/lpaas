@@ -61,12 +61,6 @@ func (jm *JobManager) StopJob(jobID string) error {
 		return fmt.Errorf("stop job: %w", err)
 	}
 
-	<-job.done
-
-	job.mu.Lock()
-	job.status = stopped
-	job.mu.Unlock()
-
 	return nil
 }
 

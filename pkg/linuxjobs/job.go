@@ -110,12 +110,19 @@ func (j *job) start(ctx context.Context, cgroupFD int) error {
 		j.mu.Lock()
 		j.exitErr = err
 		j.exitCode = exitCodeFromErr(err)
-		switch {
-		case err == nil:
+		// The only jobContext can err is when stop() function calls cancel()
+		if jobContext.Err() != nil {
+			j.status = stopped
+		} else if err == nil {
 			j.status = exited
-		default:
+		} else {
 			j.status = failed
 		}
+
+		if err := j.cgroup.delete(); err != nil {
+			j.cleanupErr = err
+		}
+
 		close(j.done)
 
 		j.mu.Unlock()
@@ -125,21 +132,19 @@ func (j *job) start(ctx context.Context, cgroupFD int) error {
 	return nil
 }
 
-// stop terminates a running job gracefully.
+// stop terminates a running job gracefully by sending a cancellation signal.
 func (j *job) stop() error {
 	j.mu.Lock()
-	defer j.mu.Unlock()
 
 	if j.status != running {
+		j.mu.Unlock()
 		return fmt.Errorf("job %s not running", j.ID)
 	}
+	j.mu.Unlock()
 
 	j.cancel()
 
-	err := j.cgroup.delete()
-	if err != nil {
-		return fmt.Errorf("delete cgroup: %w", err)
-	}
+	<-j.done
 
 	return nil
 }
