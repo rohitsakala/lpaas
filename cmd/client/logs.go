@@ -39,8 +39,10 @@ var logsCmd = &cobra.Command{
 				return fmt.Errorf("stream recv error: %w", err)
 			}
 
-			_, _ = os.Stdout.Write(chunk.Data)
-			os.Stdout.Sync()
+			_, writeErr := os.Stdout.Write(chunk.Data)
+			if writeErr != nil {
+				return fmt.Errorf("stdout write error: %w", writeErr)
+			}
 		}
 	},
 }
