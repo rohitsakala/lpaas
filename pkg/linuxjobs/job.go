@@ -205,17 +205,18 @@ type streamingReader struct {
 
 func (r *streamingReader) Read(p []byte) (int, error) {
 	for {
-		data := r.job.outBuf.bytes()
-		if r.offset < len(data) {
-			n := copy(p, data[r.offset:])
+		total := r.job.outBuf.len()
+
+		if r.offset < total {
+			n, err := r.job.outBuf.readAt(p, r.offset)
 			r.offset += n
-			return n, nil
+			return n, err
 		}
 
 		select {
 		case <-r.job.done:
-			data := r.job.outBuf.bytes()
-			if r.offset >= len(data) {
+			total = r.job.outBuf.len()
+			if r.offset >= total {
 				return 0, io.EOF
 			}
 		case <-r.newData:
@@ -235,18 +236,43 @@ func (r *streamingReader) Close() error {
 type lockedBuffer struct {
 	mu sync.RWMutex
 	b  *bytes.Buffer
+	n  int
 }
 
 func (l *lockedBuffer) write(p []byte) (int, error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
+	n, err := l.b.Write(p)
+	l.n += n
+	l.mu.Unlock()
+	return n, err
+}
+
+func (l *lockedBuffer) len() int {
+	l.mu.RLock()
+	n := l.n
+	l.mu.RUnlock()
+	return n
 }
 
 func (l *lockedBuffer) bytes() []byte {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	return append([]byte(nil), l.b.Bytes()...)
+	return slices.Clone(l.b.Bytes())
+}
+
+func (l *lockedBuffer) readAt(p []byte, offset int) (int, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+
+	if offset >= l.n {
+		return 0, io.EOF
+	}
+
+	buf := l.b.Bytes()
+
+	n := copy(p, buf[offset:])
+
+	return n, nil
 }
 
 // exitCodeFromErr extracts the process exit code from exec errors.
