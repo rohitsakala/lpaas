@@ -7,12 +7,16 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"slices"
 	"sync"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 type cgroup interface {
 	delete() error
+	openFD() (int, error)
 }
 
 // status represents the lifecycle state of a job.
@@ -49,16 +53,16 @@ func (s status) String() string {
 type job struct {
 	mu sync.Mutex
 
-	ID      string
-	command string
-	args    []string
-	cmd     *exec.Cmd
+	ID         string
+	command    string
+	args       []string
+	cmd        *exec.Cmd
+	cleanupErr error
 
 	status   status
 	exitErr  error // raw error returned by cmd.Wait()
 	exitCode int   // numeric exit code derived from exitErr
 
-	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{} // closed when job finishes
 
@@ -68,7 +72,16 @@ type job struct {
 }
 
 // newJob creates a new job instance with the given command and arguments.
-func newJob(id, cmd string, args ...string) *job {
+func newJob(id, cmd string, args ...string) (*job, error) {
+	cg, err := newCGroupV2(id)
+	if err != nil {
+		return nil, fmt.Errorf("create cgroup: %w", err)
+	}
+
+	if err := cg.setLimits(); err != nil {
+		return nil, fmt.Errorf("set limits: %w", err)
+	}
+
 	return &job{
 		ID:      id,
 		command: cmd,
@@ -76,16 +89,24 @@ func newJob(id, cmd string, args ...string) *job {
 		outBuf:  &lockedBuffer{b: new(bytes.Buffer)},
 		readers: make(map[*streamingReader]chan struct{}),
 		done:    make(chan struct{}),
-	}
+		cgroup:  cg,
+	}, nil
 }
 
 // Start begins execution of the job using its own cancellable context.
-func (j *job) start(ctx context.Context, cgroupFD int) error {
-	j.ctx, j.cancel = context.WithCancel(ctx)
+func (j *job) start(ctx context.Context) error {
+	jobContext, cancel := context.WithCancel(ctx)
+	j.cancel = cancel
 
-	cmd := exec.CommandContext(j.ctx, j.command, j.args...)
+	fd, err := j.cgroup.openFD()
+	if err != nil {
+		return fmt.Errorf("open cgroup FD: %w", err)
+	}
+	defer unix.Close(fd)
+
+	cmd := exec.CommandContext(jobContext, j.command, j.args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CgroupFD:    cgroupFD,
+		CgroupFD:    fd,
 		UseCgroupFD: true,
 	}
 
@@ -153,7 +174,7 @@ func (j *job) stop() error {
 func (j *job) statusSnapshot() (status, int, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.status, j.exitCode, j.exitErr
+	return j.status, j.exitCode, errors.Join(j.exitErr, j.cleanupErr)
 }
 
 // Stream creates a new reader for consuming job output.
