@@ -42,3 +42,5 @@ make build-client
 - Update RFD after implementation and implementation code review.
 - Add logging to the codebase.
 - Add race tests to run with `-race`.
+- Add `UnHappy` integration tests.
+- Currently this project only runs on Linux with cgroupv2 and `findmnt` command.
