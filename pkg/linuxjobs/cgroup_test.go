@@ -8,17 +8,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func restoreRoot(old string) {
-	lpaasCgroupRoot = old
-}
-
 func TestNewCGroupV2_CreatesDirectory(t *testing.T) {
-	tmp := t.TempDir()
-	old := lpaasCgroupRoot
-	lpaasCgroupRoot = tmp
-	defer restoreRoot(old)
 
-	cg, err := newCGroupV2("job1")
+	cg, err := newCGroupV2("job1", t.TempDir())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -51,12 +43,10 @@ func TestEnableControllers_HappyPath(t *testing.T) {
 }
 
 func TestSetLimits_HappyPath(t *testing.T) {
-	tmp := t.TempDir()
-	old := lpaasCgroupRoot
-	lpaasCgroupRoot = tmp
-	defer restoreRoot(old)
-
-	cg, _ := newCGroupV2("job1")
+	cg, err := newCGroupV2("job1", t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	for _, f := range []string{cpuMaxFile, memoryMaxFile, ioMaxFile} {
 		if err := os.WriteFile(filepath.Join(cg.Path, f), nil, 0644); err != nil {
@@ -80,12 +70,10 @@ func TestSetLimits_HappyPath(t *testing.T) {
 }
 
 func TestSetLimits_WritesFilesEvenIfMissing(t *testing.T) {
-	tmp := t.TempDir()
-	old := lpaasCgroupRoot
-	lpaasCgroupRoot = tmp
-	defer restoreRoot(old)
-
-	cg, _ := newCGroupV2("job1")
+	cg, err := newCGroupV2("job1", t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	// Only create memory + io, CPU missing intentionally
 	if err := os.WriteFile(filepath.Join(cg.Path, memoryMaxFile), nil, 0644); err != nil {

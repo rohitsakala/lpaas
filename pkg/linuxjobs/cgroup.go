@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -13,8 +14,8 @@ import (
 )
 
 var (
-	cgroupRootPath  = "/sys/fs/cgroup"
-	lpaasCgroupRoot = "/sys/fs/cgroup/lpaas"
+	cgroupInitMu   sync.Mutex
+	cgroupInitDone bool
 )
 
 const (
@@ -27,20 +28,53 @@ const (
 	cgroupKillFile    = "cgroup.kill"
 )
 
+// ensureCgroupHierarchy ensures the cgroup hierarchy.
+// If already initialized, it's a no-op.
+func ensureCgroupHierarchy(lpaasCgroupRoot, cgroupRootPath string) error {
+	cgroupInitMu.Lock()
+	defer cgroupInitMu.Unlock()
+
+	if cgroupInitDone {
+		return nil
+	}
+
+	if err := os.MkdirAll(lpaasCgroupRoot, 0o755); err != nil {
+		return fmt.Errorf("create cgroup root %q: %w", lpaasCgroupRoot, err)
+	}
+	if err := enableControllers(cgroupRootPath); err != nil {
+		return fmt.Errorf("enable controllers on %q: %w", cgroupRootPath, err)
+	}
+	if err := enableControllers(lpaasCgroupRoot); err != nil {
+		return fmt.Errorf("enable controllers on %q: %w", lpaasCgroupRoot, err)
+	}
+
+	cgroupInitDone = true
+	return nil
+}
+
 // cgroupv2 represents a single job’s cgroup.
 type cgroupv2 struct {
-	Path string // full path: /sys/fs/cgroup/lpaas/<jobID>
+	cgroupRootPath string // cgroup root path: /sys/fs/cgroup
+	Path           string // full path: /sys/fs/cgroup/lpaas/<jobID>
 }
 
 // newCGroupV2 creates the directory for a job’s cgroup.
-func newCGroupV2(jobID string) (*cgroupv2, error) {
+func newCGroupV2(jobID string, cgroupRootPath string) (*cgroupv2, error) {
+	if cgroupRootPath == "" {
+		cgroupRootPath = "/sys/fs/cgroup"
+	}
+	lpaasCgroupRoot := filepath.Join(cgroupRootPath, "lpaas")
 	path := filepath.Join(lpaasCgroupRoot, jobID)
+
+	if err := ensureCgroupHierarchy(lpaasCgroupRoot, cgroupRootPath); err != nil {
+		return nil, fmt.Errorf("failed to initialize cgroup: %w", err)
+	}
 
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return nil, fmt.Errorf("create job cgroup %q: %w", path, err)
 	}
 
-	return &cgroupv2{Path: path}, nil
+	return &cgroupv2{cgroupRootPath: cgroupRootPath, Path: path}, nil
 }
 
 // enableControllers activates cpu, memory, and io controllers for children under dir.
