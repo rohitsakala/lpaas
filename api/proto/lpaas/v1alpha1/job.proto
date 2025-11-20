@@ -1,0 +1,73 @@
+// Lpaas (Linux Process as a Service)
+// Provides a gRPC API for starting, stopping, status,
+// and streaming output from Linux processes managed by the server.
+syntax = "proto3";
+
+package lpaas.v1alpha1;
+
+option go_package = "github.com/rohitsakala/lpaas/api/gen/lpaas/v1alpha1;lpaasv1alpha1";
+
+
+// Lpaas defines the main gRPC API for interacting with the
+// lpaas library. Each RPC corresponds to an operation on a job.
+service Lpaas {
+  // Start a new linux job.
+  // Returns the unique ID of the job.
+  rpc StartJob(StartJobRequest) returns (StartJobResponse);
+
+  // Stops a running job by its ID.
+  // Returns the status of the job.
+  rpc StopJob(JobRequest) returns (StopJobResponse);
+
+  // Query the status of a job.
+  // Returns current status and error details if any.
+  rpc GetStatus(JobRequest) returns (StatusJobResponse);
+
+  // Stream output from a running or completed job. 
+  rpc StreamOutput(StreamRequest) returns (stream StreamChunk);
+}
+
+message StartJobRequest {
+  string command = 1;
+  repeated string args = 2;
+}
+
+message StartJobResponse {
+  // Job ID
+  string id = 1;
+}
+
+message JobRequest {
+  // Job ID
+  string id = 1;
+}
+
+// Response for GetStatus.
+message StatusJobResponse {
+  // Job ID
+  string id = 1;
+
+  // Current status of the job.
+  // Values: "Pending", "Running", "Stopped", "Exited", "Failed".
+  string status = 2;
+
+  // Exit code of the command.
+  optional int32 exit_code = 3;
+
+  // Error message.
+  optional string error = 4;
+}
+
+// Request message for Streaming Output.
+message StreamRequest {
+  string id = 1;
+}
+
+// The bytes chunk of the stream.
+message StreamChunk {
+  bytes data = 1;
+}
+
+// Empty message for StopJobResponse
+message StopJobResponse {}
+
