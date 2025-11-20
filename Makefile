@@ -53,3 +53,13 @@ client-certs: $(CA_KEY) $(CA_CERT)
 
 clean-certs:
 	rm -rf $(CERTS_DIR)
+
+BIN_DIR=bin
+CLIENT_CMD=cmd/client
+CLIENT_BINARY=$(BIN_DIR)/lpaas-client
+
+.PHONY: build-client
+build-client:
+	mkdir -p $(BIN_DIR)
+	go build -o $(CLIENT_BINARY) ./cmd/client
+	@echo "Client built at $(CLIENT_BINARY)"
